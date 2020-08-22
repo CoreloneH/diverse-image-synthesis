@@ -50,6 +50,7 @@ import pandas as pd
 from PIL import Image
 from tqdm import trange
 from collections import defaultdict
+from torchvision import transforms
 
 import torch
 from torch.utils.data import Dataset
@@ -257,9 +258,10 @@ def get_dataloader(batch_size=10, COCO_DIR='/home/zjj/data/coco', shuffle_val=Fa
     train_dset_kwargs = {
         'image_dir': coco_train_image_dir,
         'instances_json': coco_train_instances_json,
-        'normalize_image': True,
+        'normalize_image': False,
         'min_objects_per_image': 2, 
-        'max_objects_per_image': 8
+        'max_objects_per_image': 8,
+        'image_size': (256, 256),
     }
 
     train_dset = CocoDataset(**train_dset_kwargs)
@@ -271,9 +273,10 @@ def get_dataloader(batch_size=10, COCO_DIR='/home/zjj/data/coco', shuffle_val=Fa
     val_dset_kwargs = {
         'image_dir': coco_val_image_dir,
         'instances_json': coco_val_instances_json,
-        'normalize_image': True,
+        'normalize_image': False,
         'min_objects_per_image': 2, 
-        'max_objects_per_image': 8
+        'max_objects_per_image': 8,
+        'image_size': (256, 256),
     }
     val_dset = CocoDataset(**val_dset_kwargs)
     print('Validating dataset has %d images and %d objects' % (len(val_dset), val_dset.total_objects()))
@@ -329,17 +332,50 @@ def testcode():
             break
 
 
+def save_image(tensor, name):
+    # loader使用torchvision中自带的transforms函数
+    loader = transforms.Compose([
+        transforms.ToTensor()])  
 
-if __name__ == "__main__":
-    # testcode()
-    
+    unloader = transforms.ToPILImage()
+
+    image = tensor.cpu().clone()  # we clone the tensor to not do changes on it
+    image = image.squeeze(0)  # remove the fake batch dimension
+    image = unloader(image)
+    image.save(name)
+
+if __name__ == "__main__":    
     # test reading data
-    train_dataloader, val_dataloader = get_dataloader(batch_size=64)
+    train_dataloader, val_dataloader = get_dataloader(batch_size=1)
     for i, batch in enumerate(train_dataloader):
         image, objs, boxes, obj_to_img = batch
+        print(image)
         print(image.size())
+        #print(int((image.size()[-1])))
         print("====================================================================")
         print(objs)
         print(boxes)
+        #print(boxes[0][0])
         print(obj_to_img)
-        exit()
+        
+        save_image(image, 'test.jpg')
+
+        # exit()
+        # 测试mask，生成一个mask，与图像做点乘
+        mask = torch.ones(256, 256)
+        xs = int((image.size()[-2]) * boxes[0][0])
+        xd = int((image.size()[-2]) * boxes[0][2])
+        ys = int((image.size()[-1]) * boxes[0][1])
+        yd = int((image.size()[-1]) * boxes[0][3])
+        mask[ys:yd, xs:xd] = 0
+        mask = mask.unsqueeze(0)
+        mask = mask.unsqueeze(0)
+        mask = torch.repeat_interleave(mask, repeats=3, dim=1)
+        #print(mask.size())
+
+        new_img = torch.mul(mask, image)
+
+        save_image(new_img, 'test2.jpg')
+
+        
+        break
