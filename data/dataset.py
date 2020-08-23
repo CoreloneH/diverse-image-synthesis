@@ -346,12 +346,14 @@ def save_image(tensor, name):
     image.save(name)
 
 
-def batch_mask_image(image, batch_size, boxes, obj_to_img, image_name):
+def batch_mask_image(image, batch_size, objs, boxes, obj_to_img, image_name):
     mask_images = []
+    mask_instance_class = []
     image_num = batch_size
     # 测试mask，生成一个mask，与图像做点乘
     # 获得当前某张img中包含的box,随机选择某个box进行mask
     obj2img_list = obj_to_img.cpu().numpy().tolist()
+    objs_list = objs.cpu().numpy().tolist()
     for im in range(image_num):
         index1 = obj2img_list.index(im)
         index2 = obj2img_list[::-1].index(im)
@@ -359,6 +361,7 @@ def batch_mask_image(image, batch_size, boxes, obj_to_img, image_name):
         box_i = np.random.randint(0, len(obj_list))
         mask = torch.ones(256, 256)
         order = index1 + box_i
+        mask_instance_class.append(objs_list[order])
         xs = int((image[im, :, :, :].size()[-2]) * boxes[order][0])
         xd = int((image[im, :, :, :].size()[-2]) * boxes[order][2])
         ys = int((image[im, :, :, :].size()[-1]) * boxes[order][1])
@@ -370,11 +373,12 @@ def batch_mask_image(image, batch_size, boxes, obj_to_img, image_name):
         mask_img = torch.mul(mask, image[im, :, :, :])
         mask_images.append(mask_img)
         imgid = image_name[im].split(".jpg")[0]
-        mask_img_path = os.path.join("/home/zjj/diverse-image-synthesis/train_mask_image", imgid + "_mask_" + str(box_i)+".jpg")
+        mask_img_path = os.path.join("/home/zjj/diverse-image-synthesis/train_mask_image", imgid + "_maskbox_" + str(box_i)+".jpg")
         if not os.path.isfile(mask_img_path):
             save_image(mask_img, mask_img_path)
     mask_images = torch.cat(mask_images)
-    return mask_images
+    mask_instance_class = torch.tensor(mask_instance_class)
+    return mask_images, mask_instance_class
 
 
 if __name__ == "__main__":    
@@ -405,5 +409,5 @@ if __name__ == "__main__":
                     save_image(image[i, :, :, :], raw_img_path)
         break
         # exit()
-        mask_imgs = batch_mask_image(image, batch_size, boxes, obj_to_img, image_name)
+        mask_imgs, mask_class= batch_mask_image(image, batch_size, objs, boxes, obj_to_img, image_name)
         break
