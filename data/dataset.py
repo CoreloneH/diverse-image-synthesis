@@ -56,7 +56,6 @@ import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
-
 from utils.data import imagenet_preprocess, Resize
 
 class CocoDataset(Dataset):
@@ -194,7 +193,8 @@ class CocoDataset(Dataset):
                 image = self.transform(image.convert('RGB'))
         
         H, W = self.image_size
-        objs, boxes= [], []
+        objs, boxes = [], []
+        image_name = filename
         for object_data in self.image_id_to_objects[image_id]:
             objs.append(object_data['category_id'])
             x, y, w, h = object_data['bbox']
@@ -215,7 +215,7 @@ class CocoDataset(Dataset):
         objs = torch.LongTensor(objs)
         boxes = torch.stack(boxes, dim=0)
 
-        return image, objs, boxes
+        return image, objs, boxes, image_name
 
 def coco_collate_fn(batch):
     """
@@ -227,20 +227,21 @@ def coco_collate_fn(batch):
     - obj_to_img: LongTensor of shape (O,) mapping objects to images
     """
 
-    all_imgs, all_objs, all_boxes, all_obj_to_img = [], [], [], []
-    for i, (img, objs, boxes) in enumerate(batch):
+    all_imgs, all_objs, all_boxes, all_obj_to_img, all_imgs_name = [], [], [], [], []
+    for i, (img, objs, boxes, image_name) in enumerate(batch):
         all_imgs.append(img[None])
         O = objs.size(0)
         all_objs.append(objs)
         all_boxes.append(boxes)
         all_obj_to_img.append(torch.LongTensor(O).fill_(i))
+        all_imgs_name.append(image_name)
 
     all_imgs = torch.cat(all_imgs)
     all_objs = torch.cat(all_objs)
     all_boxes = torch.cat(all_boxes)
     all_obj_to_img = torch.cat(all_obj_to_img)
 
-    out = (all_imgs, all_objs, all_boxes, all_obj_to_img)
+    out = (all_imgs, all_objs, all_boxes, all_obj_to_img, all_imgs_name)
 
     return out
 
@@ -344,38 +345,65 @@ def save_image(tensor, name):
     image = unloader(image)
     image.save(name)
 
-if __name__ == "__main__":    
-    # test reading data
-    train_dataloader, val_dataloader = get_dataloader(batch_size=1)
-    for i, batch in enumerate(train_dataloader):
-        image, objs, boxes, obj_to_img = batch
-        print(image)
-        print(image.size())
-        #print(int((image.size()[-1])))
-        print("====================================================================")
-        print(objs)
-        print(boxes)
-        #print(boxes[0][0])
-        print(obj_to_img)
-        
-        save_image(image, 'test.jpg')
 
-        # exit()
-        # 测试mask，生成一个mask，与图像做点乘
+def batch_mask_image(image, batch_size, boxes, obj_to_img, image_name):
+    mask_images = []
+    image_num = batch_size
+    # 测试mask，生成一个mask，与图像做点乘
+    # 获得当前某张img中包含的box,随机选择某个box进行mask
+    obj2img_list = obj_to_img.cpu().numpy().tolist()
+    for im in range(image_num):
+        index1 = obj2img_list.index(im)
+        index2 = obj2img_list[::-1].index(im)
+        obj_list = obj2img_list[index1:-index2] if index2 != 0 else obj2img_list[index1:]
+        box_i = np.random.randint(0, len(obj_list))
         mask = torch.ones(256, 256)
-        xs = int((image.size()[-2]) * boxes[0][0])
-        xd = int((image.size()[-2]) * boxes[0][2])
-        ys = int((image.size()[-1]) * boxes[0][1])
-        yd = int((image.size()[-1]) * boxes[0][3])
+        order = index1 + box_i
+        xs = int((image[im, :, :, :].size()[-2]) * boxes[order][0])
+        xd = int((image[im, :, :, :].size()[-2]) * boxes[order][2])
+        ys = int((image[im, :, :, :].size()[-1]) * boxes[order][1])
+        yd = int((image[im, :, :, :].size()[-1]) * boxes[order][3])
         mask[ys:yd, xs:xd] = 0
         mask = mask.unsqueeze(0)
         mask = mask.unsqueeze(0)
         mask = torch.repeat_interleave(mask, repeats=3, dim=1)
-        #print(mask.size())
+        mask_img = torch.mul(mask, image[im, :, :, :])
+        mask_images.append(mask_img)
+        imgid = image_name[im].split(".jpg")[0]
+        mask_img_path = os.path.join("/home/zjj/diverse-image-synthesis/train_mask_image", imgid + "_mask_" + str(box_i)+".jpg")
+        if not os.path.isfile(mask_img_path):
+            save_image(mask_img, mask_img_path)
+    mask_images = torch.cat(mask_images)
+    return mask_images
 
-        new_img = torch.mul(mask, image)
 
-        save_image(new_img, 'test2.jpg')
-
-        
+if __name__ == "__main__":    
+    # test reading data
+    train_dataloader, val_dataloader = get_dataloader(batch_size=4)
+    '''
+    called set_image_size (256, 256)
+    Training dataset has 77446 images and 273214 objects
+    (3.53 objects per image)
+    called set_image_size (256, 256)
+    Validating dataset has 3228 images and 11461 objects
+    (3.55 objects per image)
+    '''
+    for i, batch in enumerate(train_dataloader):
+        image, objs, boxes, obj_to_img, image_name = batch
+        # print(image)
+        print(image.size()) # torch.Size([batchsize, 3, 256, 256])
+        print("====================================================================")
+        print(objs.size()) # torch.Size([?])
+        print(boxes.size()) # torch.Size([?,4])
+        print(obj_to_img.size()) # torch.Size([?])
+        assert image.size()[0] == len(image_name)
+        batch_size = image.size()[0]
+        if batch_size > 1:
+            for i in range(batch_size):
+                raw_img_path = os.path.join("/home/zjj/diverse-image-synthesis/train_raw_image", image_name[i])
+                if not os.path.isfile(raw_img_path):
+                    save_image(image[i, :, :, :], raw_img_path)
+        break
+        # exit()
+        mask_imgs = batch_mask_image(image, batch_size, boxes, obj_to_img, image_name)
         break
