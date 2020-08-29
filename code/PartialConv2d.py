@@ -1,10 +1,4 @@
-###############################################################################
-# BSD 3-Clause License
-#
-# Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
-#
-# Author & Contact: Guilin Liu (guilinl@nvidia.com)
-###############################################################################
+# 解决了最后一个batch不等报错的bug, 2020-8-29
 
 import torch
 import torch.nn.functional as F
@@ -36,15 +30,14 @@ class PartialConv2d(nn.Conv2d):
             
         self.slide_winsize = self.weight_maskUpdater.shape[1] * self.weight_maskUpdater.shape[2] * self.weight_maskUpdater.shape[3]
 
-        self.last_size = (None, None)
+        self.last_size = (None, None, None) # modified
         self.update_mask = None
         self.mask_ratio = None
 
     def forward(self, input, mask=None):
         
-        if mask is not None or self.last_size != (input.data.shape[2], input.data.shape[3]):
-            self.last_size = (input.data.shape[2], input.data.shape[3])
-
+        if mask is not None or self.last_size != (input.data.shape[0], input.data.shape[2], input.data.shape[3]):
+            self.last_size = (input.data.shape[0], input.data.shape[2], input.data.shape[3])
             with torch.no_grad():
                 if self.weight_maskUpdater.type() != input.type():
                     self.weight_maskUpdater = self.weight_maskUpdater.to(input)
@@ -67,6 +60,7 @@ class PartialConv2d(nn.Conv2d):
             self.update_mask.to(input)
             self.mask_ratio.to(input)
 
+
         raw_out = super(PartialConv2d, self).forward(torch.mul(input, mask) if mask is not None else input)
 
         if self.bias is not None:
@@ -74,6 +68,8 @@ class PartialConv2d(nn.Conv2d):
             output = torch.mul(raw_out - bias_view, self.mask_ratio) + bias_view
             output = torch.mul(output, self.update_mask)
         else:
+            # print(raw_out.size())
+            # print("self.mask_ratio, ", self.mask_ratio.size())
             output = torch.mul(raw_out, self.mask_ratio)
 
 
@@ -87,6 +83,11 @@ if __name__ == "__main__":
     input_t = torch.rand(100, 3, 256, 256)
     Pconv1 = PartialConv2d(in_channels=3,  out_channels=64, kernel_size=7, stride=2, padding=3, \
         multi_channel = True, return_mask = True, bias = False)
+    output, mask = Pconv1(input_t)
+    print(mask.size())
+    print(output.size())
+
+    input_t = torch.rand(200, 3, 256, 256)
     output, mask = Pconv1(input_t)
     print(mask.size())
     print(output.size())

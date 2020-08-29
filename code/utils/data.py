@@ -17,6 +17,7 @@
 import PIL
 import torch
 import torchvision.transforms as T
+from PIL import Image
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -67,7 +68,7 @@ def imagenet_deprocess_batch(imgs, rescale=True):
 
 
 class Resize(object):
-    def __init__(self, size, interp=PIL.Image.BILINEAR):
+    def __init__(self, size, interp=Image.BILINEAR):
         if isinstance(size, tuple):
             H, W = size
             self.size = (W, H)

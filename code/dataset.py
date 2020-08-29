@@ -56,12 +56,13 @@ import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
-
 from utils.data import imagenet_preprocess, Resize
+from miscc.config import cfg, cfg_from_file
 
 class CocoDataset(Dataset):
-    def __init__(self, image_dir, instances_json, normalize_image=False, image_size=(64, 64),
-                min_object_size=0.02, min_objects_per_image=3, max_objects_per_image=8, max_samples=None):
+    def __init__(self, image_dir, instances_json, normalize_image=False, image_size=cfg.DATASET.IMAGE_SIZE, 
+                min_object_size=0.02, min_objects_per_image=cfg.DATASET.MIN_OBJ_NUM, 
+                max_objects_per_image=cfg.DATASET.MAX_OBJ_NUM, max_samples=None):
         super(Dataset, self).__init__()
         '''
         input:
@@ -151,7 +152,7 @@ class CocoDataset(Dataset):
         self.image_ids = new_image_ids
 
     def set_image_size(self, image_size):
-        print('called set_image_size', image_size)
+        # print('called set_image_size', image_size)
         transform = [Resize(image_size), T.ToTensor()]
         if self.normalize_image:
             transform.append(imagenet_preprocess())
@@ -194,7 +195,8 @@ class CocoDataset(Dataset):
                 image = self.transform(image.convert('RGB'))
         
         H, W = self.image_size
-        objs, boxes= [], []
+        objs, boxes = [], []
+        image_name = filename
         for object_data in self.image_id_to_objects[image_id]:
             objs.append(object_data['category_id'])
             x, y, w, h = object_data['bbox']
@@ -215,7 +217,7 @@ class CocoDataset(Dataset):
         objs = torch.LongTensor(objs)
         boxes = torch.stack(boxes, dim=0)
 
-        return image, objs, boxes
+        return image, objs, boxes, image_name
 
 def coco_collate_fn(batch):
     """
@@ -227,27 +229,28 @@ def coco_collate_fn(batch):
     - obj_to_img: LongTensor of shape (O,) mapping objects to images
     """
 
-    all_imgs, all_objs, all_boxes, all_obj_to_img = [], [], [], []
-    for i, (img, objs, boxes) in enumerate(batch):
+    all_imgs, all_objs, all_boxes, all_obj_to_img, all_imgs_name = [], [], [], [], []
+    for i, (img, objs, boxes, image_name) in enumerate(batch):
         all_imgs.append(img[None])
         O = objs.size(0)
         all_objs.append(objs)
         all_boxes.append(boxes)
         all_obj_to_img.append(torch.LongTensor(O).fill_(i))
+        all_imgs_name.append(image_name)
 
     all_imgs = torch.cat(all_imgs)
     all_objs = torch.cat(all_objs)
     all_boxes = torch.cat(all_boxes)
     all_obj_to_img = torch.cat(all_obj_to_img)
 
-    out = (all_imgs, all_objs, all_boxes, all_obj_to_img)
+    out = (all_imgs, all_objs, all_boxes, all_obj_to_img, all_imgs_name)
 
     return out
 
 
 
 
-def get_dataloader(batch_size=10, COCO_DIR='/home/zjj/data/coco', shuffle_val=False):
+def get_dataloader(batch_size=64, COCO_DIR='/home/zjj/data/coco', shuffle_val=False):
     coco_train_image_dir = os.path.join(COCO_DIR, 'train2017')
     coco_val_image_dir = os.path.join(COCO_DIR, 'val2017')
     coco_train_instances_json = os.path.join(COCO_DIR, 'annotations/instances_train2017.json')
@@ -304,38 +307,9 @@ def get_dataloader(batch_size=10, COCO_DIR='/home/zjj/data/coco', shuffle_val=Fa
     return train_loader, val_loader
 
 
-
-def testcode():
-    with open('/home/zjj/data/coco/annotations/instances_val2017.json','r',encoding='utf8')as fp:
-        instances_data = json.load(fp)
-        print(instances_data.keys())
-        for image_data in instances_data['images']:
-            image_id = image_data['id']
-            filename = image_data['file_name']
-            width = image_data['width']
-            height = image_data['height']
-            break
-
-        for category_data in instances_data['categories']:
-            category_id = category_data['id']
-            category_name = category_data['name']
-            category_supercategory = category_data['supercategory']
-            print(category_id, category_name, category_supercategory)
-            break
-        
-        for object_data in instances_data['annotations']:
-            image_id = object_data['image_id']
-            lefttop_x, lefttop_y, w, h = object_data['bbox']
-            # W, H = self.image_id_to_size[image_id]
-            # box_area = (w * h) / (W * H)
-            print(image_id, lefttop_x, lefttop_y, w, h)
-            break
-
-
 def save_image(tensor, name):
     # loader使用torchvision中自带的transforms函数
-    loader = transforms.Compose([
-        transforms.ToTensor()])  
+    # loader = transforms.Compose([transforms.ToTensor()])  
 
     unloader = transforms.ToPILImage()
 
@@ -344,38 +318,163 @@ def save_image(tensor, name):
     image = unloader(image)
     image.save(name)
 
+
+def batch_mask_image(image, batch_size, objs, boxes, obj_to_img, image_name):
+    mask_images = []
+    total_mask = []
+    masked_patch_images = []
+    mask_instance_class = []
+    real_labels = []
+    image_num = batch_size
+
+    unloader = transforms.ToPILImage()
+
+    # 测试mask，生成一个mask，与图像做点乘
+    # 获得当前某张img中包含的box,随机选择某个box进行mask
+    obj2img_list = obj_to_img.cpu().numpy().tolist()
+    objs_list = objs.cpu().numpy().tolist()
+
+    image = image.cpu()
+    
+    for im in range(image_num):
+        index1 = obj2img_list.index(im)
+        index2 = obj2img_list[::-1].index(im)  # obj2img_list[::-1]将obj2img_list翻转
+
+        obj_list = obj2img_list[index1:-index2] if index2 != 0 else obj2img_list[index1:] # 当前图片的obj_list
+        im_real_labels = [0.] * len(obj_list) # add mask label
+        box_i = np.random.randint(0, len(obj_list)) # 随机挑选一个obj进行mask
+        im_real_labels[box_i] = 1. # add mask label
+        real_labels.append(im_real_labels)
+        mask = torch.ones(256, 256)
+        order = index1 + box_i # 该obj的mask位置
+        mask_instance_class.append(objs_list[order])
+        xs = int((image[im, :, :, :].size()[-2]) * boxes[order][0])
+        xd = int((image[im, :, :, :].size()[-2]) * boxes[order][2])
+        ys = int((image[im, :, :, :].size()[-1]) * boxes[order][1])
+        yd = int((image[im, :, :, :].size()[-1]) * boxes[order][3])
+        mask[ys:yd, xs:xd] = 0 
+        mask = mask.unsqueeze(0)
+        mask = mask.unsqueeze(0)
+        mask = torch.repeat_interleave(mask, repeats=3, dim=1)
+        total_mask.append(mask)
+        mask_img = torch.mul(mask, image[im, :, :, :])
+        mask_images.append(mask_img)
+        
+        # save and resize obj patch
+        per_img = unloader(image[im])
+        x_s = int(256 * boxes[order][0])
+        y_s = int(256 * boxes[order][1])
+        x_e = int(256 * boxes[order][2])
+        y_e = int(256 * boxes[order][3])
+        img_patch = per_img.crop((x_s, y_s, x_e, y_e))
+
+        transform = [Resize((32, 32)), T.ToTensor()]
+        normalize_image = False
+        if normalize_image:
+            transform.append(imagenet_preprocess())
+        transform = T.Compose(transform)
+        image_patch = transform(img_patch.convert('RGB')) # 3 x 32 x 32
+        image_patch = image_patch.unsqueeze(0)
+        masked_patch_images.append(image_patch)
+
+        imgid = image_name[im].split(".jpg")[0]
+        mask_patch_path = os.path.join("/home/hmq/DIS/train_mask_img", imgid + "_patch_" + str(box_i)+".jpg")
+        if not os.path.isfile(mask_patch_path):
+            save_image(image_patch, mask_patch_path)
+
+        mask_img_path = os.path.join("/home/hmq/DIS/train_mask_img", imgid + "_maskbox_" + str(box_i)+".jpg")
+        if not os.path.isfile(mask_img_path):
+            save_image(mask_img, mask_img_path)
+
+    total_mask = torch.cat(total_mask)
+    mask_images = torch.cat(mask_images)
+    masked_patch_images = torch.cat(masked_patch_images) 
+    mask_instance_class = torch.tensor(mask_instance_class)
+    return mask_images, mask_instance_class, real_labels, masked_patch_images, total_mask
+
+
 if __name__ == "__main__":    
-    # test reading data
-    train_dataloader, val_dataloader = get_dataloader(batch_size=1)
+    train_dataloader, val_dataloader = get_dataloader(batch_size=cfg.TRAIN.BATCH_SIZE, \
+        COCO_DIR=cfg.DATA_DIR, shuffle_val=False)
+    '''
+    called set_image_size (256, 256)
+    Training dataset has 77446 images and 273214 objects
+    (3.53 objects per image)
+    called set_image_size (256, 256)
+    Validating dataset has 3228 images and 11461 objects
+    (3.55 objects per image)
+    '''
+    for i, batch in enumerate(train_dataloader):
+        image, objs, boxes, obj_to_img, image_name = batch
+        # print(image)
+        # print(image.size()) # torch.Size([batchsize, 3, 256, 256])
+        # print(objs.size()) # torch.Size([?])
+        print(boxes) # torch.Size([?,4])
+        print(obj_to_img) # torch.Size([?])
+        assert image.size()[0] == len(image_name)
+        batch_size = image.size()[0]
+
+        if batch_size > 1:
+            for i in range(batch_size):
+                raw_img_path = os.path.join("/home/hmq/DIS/train_mask_img", image_name[i])
+                if not os.path.isfile(raw_img_path):
+                    save_image(image[i, :, :, :], raw_img_path)
+        # break
+        # exit()
+        mask_imgs, mask_class, real_labels, masked_patch_images, total_mask = batch_mask_image(image, batch_size, \
+            objs, boxes, obj_to_img, image_name)
+        print(mask_imgs.size())
+        print(real_labels)
+        print(masked_patch_images.size())
+        print("total_mask, ", total_mask.size())
+        break
+
+
+    '''
     for i, batch in enumerate(train_dataloader):
         image, objs, boxes, obj_to_img = batch
-        print(image)
-        print(image.size())
+        #print(image)
+        print("image", image.size())
         #print(int((image.size()[-1])))
         print("====================================================================")
-        print(objs)
-        print(boxes)
+        print("objs", objs, objs.size())
+        print("boxes", boxes, boxes.size())
         #print(boxes[0][0])
-        print(obj_to_img)
+        print("obj_toimg", obj_to_img, obj_to_img.size())
         
-        save_image(image, 'test.jpg')
-
         # exit()
+        image_test = image[0]
+        save_image(image_test, 'test.jpg')
+        # 测试裁剪图片
+        x = int(256 * boxes[0][0])
+        y = int(256 * boxes[0][1])
+        width = int(256 * boxes[0][2])
+        height = int(256 * boxes[0][3])
+        print(x, y, width, height)
+        unloader = transforms.ToPILImage()
+        image_test = unloader(image_test)
+        image_crop = image_test.crop((x, y, width, height))
+        loader = transforms.Compose([transforms.ToTensor()])  
+        image_crop = loader(image_crop)
+        save_image(image_crop, 'test_crop.jpg')
+        # exit()
+
+
         # 测试mask，生成一个mask，与图像做点乘
         mask = torch.ones(256, 256)
-        xs = int((image.size()[-2]) * boxes[0][0])
-        xd = int((image.size()[-2]) * boxes[0][2])
-        ys = int((image.size()[-1]) * boxes[0][1])
-        yd = int((image.size()[-1]) * boxes[0][3])
+        xs = int((image[0].size()[-2]) * boxes[0][0])
+        xd = int((image[0].size()[-2]) * boxes[0][2])
+        ys = int((image[0].size()[-1]) * boxes[0][1])
+        yd = int((image[0].size()[-1]) * boxes[0][3])
         mask[ys:yd, xs:xd] = 0
         mask = mask.unsqueeze(0)
         mask = mask.unsqueeze(0)
         mask = torch.repeat_interleave(mask, repeats=3, dim=1)
         #print(mask.size())
+        new_img = torch.mul(mask, image[0])
 
-        new_img = torch.mul(mask, image)
-
-        save_image(new_img, 'test2.jpg')
+        save_image(new_img, 'test_mask.jpg')
 
         
         break
+    '''
